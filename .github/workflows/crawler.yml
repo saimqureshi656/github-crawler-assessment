@@ -1,77 +1,77 @@
-# GitHub Actions Workflow
-# This file tells GitHub: "When X happens, do Y"
+# ============================================================
+# GitHub Actions Workflow - GitHub Crawler
+# ============================================================
 
 name: GitHub Crawler
 
-# When to run this workflow
+# ------------------------------------------------------------
+# WHEN TO RUN
+# ------------------------------------------------------------
 on:
   push:
-    branches: [ main ]      # Run when code is pushed to main branch
-  workflow_dispatch:        # Allow manual trigger from GitHub UI
+    branches: [ main ]          # Run when code is pushed to main branch
+  workflow_dispatch:            # Allow manual trigger from GitHub UI
   schedule:
-    - cron: '0 0 * * *'    # Run daily at midnight UTC (for continuous updates)
+    - cron: '0 0 * * *'        # Run daily at midnight UTC (optional)
 
+# ------------------------------------------------------------
+# MAIN JOB
+# ------------------------------------------------------------
 jobs:
   crawl:
-    # What machine to run on
-    runs-on: ubuntu-latest  # Free Linux VM provided by GitHub
-    
-    # Service containers: Extra containers that run alongside your code
+    runs-on: ubuntu-latest      # Free Linux VM
+
+    # --------------------------------------------------------
+    # POSTGRES SERVICE CONTAINER
+    # --------------------------------------------------------
     services:
       postgres:
-        # Docker image to use
         image: postgres:15
-        
-        # Environment variables for PostgreSQL
         env:
-          POSTGRES_PASSWORD: postgres  # Password for postgres user
-          POSTGRES_DB: github_crawler  # Database name to create
-        
-        # Health check: Wait until PostgreSQL is ready
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: github_crawler
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-        
-        # Expose port so our code can connect
-        ports:
-          - 5432:5432  # Map container port 5432 to host port 5432
-    
-    # Steps: Individual tasks that run in sequence
+
+    # --------------------------------------------------------
+    # STEPS
+    # --------------------------------------------------------
     steps:
-      # Step 1: Get the code
+      # Step 1: Checkout code
       - name: Checkout code
-        uses: actions/checkout@v4  # Official GitHub action to clone repo
-      
+        uses: actions/checkout@v4
+
       # Step 2: Install Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # Use Python 3.11
-          cache: 'pip'            # Cache pip packages for faster runs
-      
-      # Step 3: Install Python dependencies
+          python-version: '3.11'
+          cache: 'pip'
+
+      # Step 3: Install dependencies
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
-      
+
       # Step 4: Wait for PostgreSQL to be fully ready
-      # Sometimes the health check passes but DB isn't fully ready
       - name: Wait for PostgreSQL
         run: |
-          until pg_isready -h localhost -p 5432 -U postgres; do
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U postgres && break
             echo "Waiting for postgres..."
             sleep 2
           done
-          echo "PostgreSQL is ready!"
-      
+          echo "✅ PostgreSQL is ready!"
+
       # Step 5: Create database tables
       - name: Setup database schema
-        env:
-          # Environment variable for database connection
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
         run: |
           python -c "
           from src.db.connection import DatabaseManager
@@ -81,27 +81,24 @@ jobs:
           db.close()
           print('✅ Schema created successfully')
           "
-      
-      # Step 6: Run the crawler (THE MAIN TASK!)
+
+      # Step 6: Run crawler
       - name: Crawl GitHub repositories
         env:
-          # GitHub automatically provides GITHUB_TOKEN
-          # No setup needed - it just works!
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
         run: |
           python src/main.py
-      
-      # Step 7: Export results using PostgreSQL's COPY command
+
+      # Step 7: Export results to CSV (FIXED VERSION)
       - name: Export database results
         run: |
           # Install PostgreSQL client tools
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get update && sudo apt-get install -y postgresql-client
           
-          # Export to CSV using psql
+          # Use COPY ... TO STDOUT instead of \COPY to avoid Bash parsing errors
           PGPASSWORD=postgres psql -h localhost -U postgres -d github_crawler -c "
-          \COPY (
+          COPY (
             SELECT 
               r.id, 
               r.full_name, 
@@ -112,19 +109,15 @@ jobs:
             FROM repositories r
             JOIN repository_stars rs ON r.id = rs.repository_id
             ORDER BY rs.star_count DESC
-          ) TO 'results.csv' CSV HEADER
-          "
-          
-          echo "✅ CSV export complete"
-      
-      # Step 8: Upload results as artifact
-      # Artifacts persist after the workflow ends
+          ) TO STDOUT WITH CSV HEADER
+          " > results.csv
+
+          echo '✅ CSV export complete'
+
+      # Step 8: Upload results artifact
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crawler-results-${{ github.run_number }}  # Unique name per run
-          path: |
-            results.csv
-            github_repos.csv
-          retention-days: 30  # Keep for 30 days
-      
+          name: crawler-results-${{ github.run_number }}
+          path: results.csv
+          retention-days: 30
